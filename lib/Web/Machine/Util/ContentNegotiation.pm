@@ -18,6 +18,7 @@ use Sub::Exporter -setup => {
         choose_language
         choose_charset
         choose_encoding
+        choose_datetime
     ]]
 };
 
@@ -53,6 +54,17 @@ sub choose_charset {
 sub choose_encoding {
     my ($provided, $header) = @_;
     $NEGOTIATOR->choose_encoding( [ keys %$provided ], $header );
+}
+
+sub choose_datetime {
+    my ($provided, $header) = @_;
+    #$NEGOTIATOR->choose_datetime( $provided, $header );
+    my @possible =
+        sort { $a <=> $b }
+        grep { $_ -> is_infinite || $_ <= $header }
+        @$provided;
+    return shift @possible if @possible;
+    return;
 }
 
 1;

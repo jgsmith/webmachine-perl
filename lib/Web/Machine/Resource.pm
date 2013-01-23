@@ -6,6 +6,7 @@ use warnings;
 
 use Carp         qw[ confess ];
 use Scalar::Util qw[ blessed ];
+use DateTime::Infinite;
 
 sub new {
     my ($class, %args) = @_;
@@ -54,6 +55,7 @@ sub content_types_accepted    { [] }
 sub charsets_provided         { [] }
 sub languages_provided        { [] }
 sub encodings_provided        { { 'identity' => sub { $_[1] } } }
+sub datetimes_provided        { [ DateTime::Infinite::Future->new ] }
 sub variances                 { [] }
 sub is_conflict               { 0 }
 sub multiple_choices          { 0 }
@@ -64,6 +66,19 @@ sub last_modified             { undef }
 sub expires                   { undef }
 sub generate_etag             { undef }
 sub finish_request            {}
+
+sub choose_datetime {
+  my($self, $dt) = @_;
+
+  my $opts = $self -> datetimes_provided;
+  return 0 if !$opts || !@{$opts};
+  my @times =
+      sort { $a <=> $b }
+      grep { $_ <= $dt }
+      @{$opts};
+  return 1 if @times;
+  return 0;
+}
 
 1;
 

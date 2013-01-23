@@ -37,6 +37,11 @@ use Sub::Exporter -setup => {
     ]]
 };
 
+use DateTime::Format::Strptime qw[
+    strftime
+    strptime 
+];
+
 my %STATE_DESC;
 
 # my exports ...
@@ -216,7 +221,30 @@ sub b3 {
         $response->headers( $resource->options );
         return \200;
     }
-    return \&c3
+    return \&accept_datetime_exists;
+}
+
+$STATE_DESC{'accept_datetime_exists'} = 'accept_datetime_exists';
+sub accept_datetime_exists {
+    my ($resource, $request, $response, $metadata) = @_;
+    if( $request -> header('Accept-Datetime') ) {
+        return \&accept_datetime_choice_available
+    }
+    else {
+        return \&c3
+    }
+}
+
+$STATE_DESC{'accept_datetime_choice_available'} = 'accept_datetime_choice_available';
+sub accept_datetime_choice_available {
+    my ($resource, $request, $response, $metadata) = @_;
+    if( my $datetime = $resource->choose_datetime( strptime("%a, %d %b %Y %r", $request->header('Accept-Datetime')) ) ) {
+        $response->header( 'Datetime' => strftime("%a, %d %b %Y %r", $datetime) ) if $datetime->is_finite;
+        $metadata->{'Datetime'} = $datetime;
+        return \&c3;
+    }
+
+    return \406;
 }
 
 $STATE_DESC{'c3'} = 'accept_header_exists';
@@ -338,6 +366,7 @@ sub g7 {
     push @variances => 'Accept-Encoding' if scalar keys %{ $resource->encodings_provided } > 1;
     push @variances => 'Accept-Charset'  if defined $resource->charsets_provided && scalar @{ $resource->charsets_provided } > 1;
     push @variances => 'Accept-Language' if scalar @{ $resource->languages_provided } > 1;
+    push @variances => 'Accept-Datetime' if defined $resource->datetimes_provided && scalar @{ $resource->datetimes_provided } > 1;
 
     $response->header( 'Vary' => join ', ' => @variances ) if @variances;
 
