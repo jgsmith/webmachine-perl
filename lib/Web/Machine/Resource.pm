@@ -31,6 +31,12 @@ sub init {}
 sub request  { (shift)->{'request'}  }
 sub response { (shift)->{'response'} }
 
+# NOTE:
+# this is where we deviate from
+# the Erlang/Ruby versions
+# - SL
+sub create_path_after_handler { 0 }
+
 sub resource_exists           { 1 }
 sub service_available         { 1 }
 sub is_authorized             { 1 }
@@ -53,6 +59,7 @@ sub process_post              { 0 }
 sub content_types_provided    { [] }
 sub content_types_accepted    { [] }
 sub charsets_provided         { [] }
+sub default_charset           {}
 sub languages_provided        { [] }
 sub encodings_provided        { { 'identity' => sub { $_[1] } } }
 sub datetimes_provided        { [ DateTime::Infinite::Future->new ] }
@@ -111,27 +118,95 @@ This is the core representation of the web resource in
 L<Web::Machine>. It is this object which is interrogated
 through the state machine. It is important not to think
 of this as an instance of a single object, but as a web
-representation of a resource, there is a big difference.
+representation of a resource: there is a big difference.
 
-For now I am keeping the docs short, but much more needs
-to be written here. Below you will find a description of
-each method this object provides and what is expected of
-it. These docs were lovingly stolen from the ruby port
+For now I am keeping the documentation short, but much more needs to be
+written here. Below you will find a description of each method this object
+provides and what is expected of it. Your resource classes should extend the
+base L<Web::Machine::Resource> class, overriding its methods as
+necessary. Sane defaults are provided for most methods, but you will want to
+create a C<content_types_provided> method, as without this your resource will
+not be able to return any useful content.
+
+The documentation was lovingly stolen from the ruby port
 of webmachine.
 
 =head1 METHODS
+
+Keep in mind that the methods may be called more than once
+per request, so your implementations should be idempotent.
 
 =over 4
 
 =item C<init( \%args )>
 
 This method is called right after the object is blessed
-and it is passed reference to the original C<%args> that
-were given to the constructor.
+and it is passed a reference to the original C<%args> that
+were given to the constructor. By default, these will
+include C<request> (L<Plack::Request>) and C<response>
+(L<Plack::Response>) arguments.
 
-The default method is a no-op, so there is no need to call
-the SUPER method, however it is still recommended to
-ensure proper initialization.
+If your resource is instantiated via L<Web::Machine> then the
+contents of its C<resource_args> parameter will be appended
+to the L<Web::Machine::Resource> constructor arguments and
+made available to C<init>:
+
+    use strict;
+    use warnings;
+
+    use Web::Machine;
+
+    {
+        package HelloWorld::Resource;
+        use strict;
+        use warnings;
+        use JSON::XS qw[ encode_json ];
+
+        use parent 'Web::Machine::Resource';
+
+        sub init {
+            my $self = shift;
+            my $args = shift;
+
+            # Plack::Request
+            # my $request = $args->{request};
+
+            # Plack::Response
+            # my $response = $args->{response};
+
+            $self->{json}
+                = exists $args->{json}
+                ? $args->{json}
+                : {};
+        }
+
+        sub content_types_provided { [ { 'application/json' => 'to_json' } ] }
+
+        sub to_json {
+            my $self = shift;
+
+            encode_json( $self->{json} );
+        }
+    }
+
+    Web::Machine->new(
+        resource      => 'HelloWorld::Resource',
+        resource_args => [
+            json => {
+                message => 'Hello World!',
+            },
+        ],
+    )->to_app;
+
+=item C<request>
+
+Returns the L<Plack::Request> (or subclass) request object for the current
+request.
+
+=item C<response>
+
+Returns the L<Plack::Response> (or subclass) response object for the current
+request.
 
 =item C<resource_exists>
 
@@ -161,7 +236,7 @@ Is the client or request authorized?
 Parameter C<$authorization_header> is the contents of the
 'Authorization' header sent by the client, if present.
 
-Returning anything other than true will result in a
+Returning anything other than 1 will result in a
 '401 Unauthorized' response. If a string is returned, it
 will be used as the value in the 'WWW-Authenticate'
 response header, which can also be set manually.
@@ -203,8 +278,9 @@ If the 'Content-Type' on PUT or POST is unknown, this should
 return false, which will result in a '415 Unsupported Media
 Type' response.
 
-The C<$content_type> provided should be an instance of
-L<HTTP::Headers::ActionPack::MediaType>.
+The value of C<$content_type> is derived from the L<Plack::Request> object and
+will therefore be an instance of the L<HTTP::Headers::ActionPack::MediaType>
+class.
 
 Defaults to true.
 
@@ -222,7 +298,7 @@ If the request includes any invalid Content-* headers, this
 should return false, which will result in a '501 Not
 Implemented' response.
 
-Defaults to false.
+Defaults to true.
 
 =item C<valid_entity_length( $length )>
 
@@ -291,6 +367,15 @@ This will be called on a POST request if post_is_create? returns
 true. The path returned should be a valid URI part following the
 dispatcher prefix.
 
+=item C<create_path_after_handler>
+
+This changes the behavior of C<create_path> so that it will fire
+I<after> the content handler has processed the request body. This
+allows the creation of paths that are more tightly tied to the
+newly created entity.
+
+Default is false.
+
 =item C<base_uri>
 
 This will be called after C<create_path> but before setting the
@@ -306,13 +391,18 @@ process any POST request. If it succeeds, it should return true.
 
 =item C<content_types_provided>
 
-This should return an ARRAY of HASH ref pairs where the key is
-name of the media type and the value is a CODE ref of a method
-which can provide a resource representation in that media type.
+This should return an ARRAY of HASH ref pairs where the key is the
+name of the media type and the value is a CODE ref (or name of a
+method) which can provide a resource representation in that media
+type.
 
 For example, if a client request includes an 'Accept' header with
 a value that does not appear as a first element in any of the return
 pairs, then a '406 Not Acceptable' will be sent.
+
+The order of HASH ref pairs in the ARRAY is important. If no specific content
+type is requested (the client does not send an C<Accept> header) then the
+first content type in the ARRAY will be used as the default.
 
 Default is an empty ARRAY ref.
 
@@ -326,12 +416,67 @@ incoming entity.
 
 =item C<charsets_provided>
 
-If this is anything other than undef, it must be an ARRAY of pairs
-where each pair key is the charset name and the pair value is
-a CODE ref converter which is an arity-1 method which will be called
-on the produced body in a GET and ensure that it is in Charset.
+This specifies the charsets that your resource support. Returning a value from
+this method enables content negotiation based on the client's Accept-Charset
+header.
 
-Default is undef.
+The return value from this method must be an ARRAY ref. Each member of that
+array can be either a string or a HASH ref pair value. If the member is a
+string, it must be a valid character set name for the L<Encode>
+module. Web::Machine will call C<encode()> on the body using this character
+set if you set a body.
+
+  sub charsets_provided {
+      return [ qw( UTF-8 ISO-8859-1 shiftjis ) ];
+  }
+
+If you return a HASHREF pair, the key must be a character set name and the
+value must be a CODE ref. This CODE ref will be called I<as a method> on the
+resource object. It will receive a single parameter, a string to be
+encoded. It is expected to return a scalar containing B<bytes>, not
+characters. This will be used to encode the body you provide.
+
+  sub charsets_provided {
+      return [
+          {
+              'UTF-8' => sub {
+                  my $self   = shift;
+                  my $string = shift;
+                  return make_some_bytes($string),;
+              },
+          },
+          {
+              'ISO-8859-1' => sub {
+                  my $self   = shift;
+                  my $string = shift;
+                  return strip_non_ascii($string),;
+              },
+          },
+      ];
+  }
+
+The character set name will be appended to the Content-Type header returned
+the client.
+
+If a client specifies the same preference for two or more character sets that
+your resource provides, then Web::Machine chooses the first character set in
+the returned ARRAY ref.
+
+B<CAVEAT:> Note that currently C<Web::Machine> does not support the use of
+encodings when the body is returned as a CODE ref. This is a bug to be
+remedied in the future.
+
+Default is an empty list.
+
+=item C<default_charset>
+
+If the client does not provide an Accept-Charset header, this sub is called to
+provide a default charset. The return value must be either a string or a
+hashref consisting of a single pair, where the key is a character set name and
+the value is a subroutine.
+
+This works just like the C<charsets_provided()> method, except that you can
+only return a single value.
 
 =item C<languages_provided>
 
@@ -344,7 +489,11 @@ in no specific language.
 This should return a HASH of encodings mapped to encoding
 methods for Content-Encodings your resource wants to
 provide. The encoding will be applied to the response body
-automatically by Webmachine.
+automatically by C<Web::Machine>.
+
+B<CAVEAT:> Note that currently C<Web::Machine> does not support the use of
+encodings when the body is returned as a CODE ref. This is a bug to be
+remedied in the future.
 
 Default includes only the 'identity' encoding.
 
@@ -352,9 +501,9 @@ Default includes only the 'identity' encoding.
 
 If this method is implemented, it should return a list of
 strings with header names that should be included in a given
-response's Vary header. The standard conneg headers (Accept,
+response's Vary header. The standard content negotiation headers (Accept,
 Accept-Encoding, Accept-Charset, Accept-Language) do not need to
-be specified here as Webmachine will add the correct elements of
+be specified here as C<Web::Machine> will add the correct elements of
 those automatically depending on resource behavior.
 
 Default is [].

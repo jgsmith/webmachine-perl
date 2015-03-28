@@ -4,7 +4,9 @@ package Web::Machine::Util::BodyEncoding;
 use strict;
 use warnings;
 
-use Web::Machine::Util qw[ first pair_key ];
+use Scalar::Util qw/ weaken isweak /;
+use Encode ();
+use Web::Machine::Util qw[ first pair_key pair_value ];
 
 use Sub::Exporter -setup => {
     exports => [qw[
@@ -14,34 +16,41 @@ use Sub::Exporter -setup => {
 };
 
 sub encode_body_if_set {
-    my ($resource, $response, $metadata) = @_;
-    encode_body( $resource, $response, $metadata ) if $response->body;
+    my ($resource, $response) = @_;
+    encode_body( $resource, $response ) if $response->body;
 }
 
 sub encode_body {
-    my ($resource, $response, $metadata) = @_;
+    my ($resource, $response) = @_;
 
+    my $metadata        = $resource->request->env->{'web.machine.context'};
     my $chosen_encoding = $metadata->{'Content-Encoding'};
     my $encoder         = $resource->encodings_provided->{ $chosen_encoding };
 
-    my $chosen_charset  = $metadata->{'Charset'};
-    my $charsetter      = $resource->charsets_provided
-                        && (first { $_ && $chosen_charset && pair_key( $_ ) eq $chosen_charset } @{ $resource->charsets_provided })
-                        || sub { $_[1] };
-    # TODO:
-    # Make this support the other
-    # body types that Plack supports
-    # (arrays, code refs, etc).
-    # - SL
-    $response->body([
-        $resource->$encoder(
-            $resource->$charsetter(
-                $response->body
-            )
-        )
-    ]);
+    my $chosen_charset = $metadata->{'Charset'};
+    my $charsetter;
+    if ( $chosen_charset && $resource->charsets_provided ) {
+        my $match =             first {
+                my $name = $_ && ref $_ ? pair_key($_) : $_;
+                $name && $name eq $chosen_charset;
+            }
+            @{ $resource->charsets_provided };
 
-    $response->header( 'Content-Length' => length join "" => @{ $response->body } );
+        $charsetter
+            = ref $match
+            ? pair_value($match)
+            : sub { Encode::encode( $match, $_[1] ) };
+    }
+
+    $charsetter ||= sub { $_[1] };
+
+    push @{ $resource->request->env->{'web.machine.content_filters'} ||= [] },
+        sub {
+            my $chunk = shift;
+            weaken $resource unless isweak $resource;
+            return unless defined $chunk;
+            return $resource->$encoder($resource->$charsetter($chunk));
+        };
 }
 
 
@@ -68,15 +77,13 @@ If the C<$response> has a body, this will call C<encode_body>.
 =item C<encode_body ( $resource, $response, $metadata )>
 
 This will find the right encoding (from the 'Content-Encoding' entry
-in the C<$metadata> HASH ref) adnd the right charset (from the 'Charset'
+in the C<$metadata> HASH ref) and the right charset (from the 'Charset'
 entry in the C<$metadata> HASH ref), then find the right transformers
 in the C<$resource>. After that it will attempt to convert the charset
 and encode the body of the C<$response>. Once completed it will set
 the C<Content-Length> header in the response as well.
 
-B<NOTE:> At the moment we do not correctly handle all the various
-body types that L<Plack> supports, and we really on handle the case
-where the body is a simple string. We plan to add more support onto this
-later.
+B<CAVEAT:> Note that currently this subroutine doesn't do anything when the
+body is returned as a CODE ref. This is a bug to be remedied in the future.
 
 =back

@@ -48,7 +48,7 @@ sub choose_language {
 sub choose_charset {
     my ($provided, $header) = @_;
     return 1 if scalar @$provided == 0;
-    $NEGOTIATOR->choose_charset( [ map { pair_key( $_ ) } @$provided ], $header );
+    $NEGOTIATOR->choose_charset( [ map { ref $_ ? pair_key( $_ ) : $_ } @$provided ], $header );
 }
 
 sub choose_encoding {
@@ -73,7 +73,7 @@ __END__
 
 =head1 SYNOPSIS
 
-  use Web::Machine::FSM::ContentNegotiation;
+  use Web::Machine::Util::ContentNegotiation;
 
 =head1 DESCRIPTION
 
@@ -86,7 +86,7 @@ This module provides a set of functions used in content negotiation.
 =item C<choose_media_type ( $provided, $header )>
 
 Given an ARRAY ref of media type strings and an HTTP header, this will
-return the appropriatly matching L<Web::Machine::Util::MediaType> instance.
+return the matching L<HTTP::Headers::ActionPack::MediaType> instance.
 
 =item C<match_acceptable_media_type ( $to_match, $accepted )>
 
