@@ -1,11 +1,13 @@
 package Web::Machine;
-# ABSTRACT: A Perl port of WebMachine
+# ABSTRACT: A Perl port of Webmachine
 
 use strict;
 use warnings;
 
+use Try::Tiny;
 use Carp         qw[ confess ];
 use Scalar::Util qw[ blessed ];
+use Module::Runtime qw[ use_package_optimistically ];
 
 use Plack::Request;
 use Plack::Response;
@@ -20,15 +22,23 @@ sub new {
 
     (exists $args{'resource'}
         && (not blessed $args{'resource'})
-            && $args{'resource'}->isa('Web::Machine::Resource'))
+            && use_package_optimistically($args{'resource'})->isa('Web::Machine::Resource'))
                 || confess 'You must pass in a resource for this Web::Machine';
+
+    if (exists $args{'request_class'}) {
+        use_package_optimistically($args{'request_class'})->isa('Plack::Request')
+            || confess 'The request_class class must inherit from Plack::Request';
+    }
+    else {
+        $args{'request_class'} = 'Plack::Request';
+    }
 
     $class->SUPER::new( \%args );
 }
 
 sub inflate_request {
     my ($self, $env) = @_;
-    inflate_headers( Plack::Request->new( $env ) );
+    inflate_headers( $self->{request_class}->new( $env ) );
 }
 
 sub create_fsm {
@@ -40,7 +50,8 @@ sub create_resource {
     my ($self, $request) = @_;
     $self->{'resource'}->new(
         request  => $request,
-        response => $request->new_response
+        response => $request->new_response,
+        @{ $self->{'resource_args'} || [] },
     );
 }
 
@@ -52,12 +63,41 @@ sub finalize_response {
 sub call {
     my ($self, $env) = @_;
 
-    my $request  = $self->inflate_request( $env );
+    my $request  = try { $self->inflate_request( $env ) };
+
+    return $self->finalize_response( Plack::Response->new( 400 ) )
+        unless defined $request;
+
     my $resource = $self->create_resource( $request );
     my $fsm      = $self->create_fsm;
 
-    my $response = $fsm->run( $resource );
-    $self->finalize_response( $response );
+    if ($self->{'streaming'}) {
+        return sub {
+            my $responder = shift;
+
+            my $response = $self->finalize_response( $fsm->run( $resource ) );
+
+            if (my $cb = $env->{'web.machine.streaming_push'}) {
+                pop @$response;
+                my $writer = $responder->($response);
+                $cb->($writer);
+            }
+            else {
+                $responder->($response);
+            }
+        }
+    }
+    else {
+        my $response = $self->finalize_response( $fsm->run( $resource ) );
+
+        if ($env->{'web.machine.streaming_push'}) {
+            die "Can't do a streaming push response "
+              . "unless the 'streaming' option was set";
+        }
+        else {
+            return $response;
+        }
+    }
 }
 
 1;
@@ -96,22 +136,33 @@ __END__
 
 =head1 DESCRIPTION
 
-This is a port of L<Webmachine|https://github.com/basho/webmachine>,
-actually it is much closer to L<the ruby version|https://github.com/seancribbs/webmachine-ruby>, with
-a little bit of L<the javascript version|https://github.com/tautologistics/nodemachine>
-and even some of L<the python version|https://github.com/davisp/pywebmachine>
+C<Web::Machine> provides a RESTful web framework modeled as a state
+machine. You define one or more resource classes. Each resource represents a
+single RESTful URI end point, such as a user, an email, etc. The resource
+class can also be the target for C<POST> requests to create a new user, email,
+etc.
+
+Each resource is a state machine, and each request for a resource is handled
+by running the request through that state machine.
+
+C<Web::Machine> is built on top of L<Plack>, but it handles the full request
+and response cycle.
+
+See L<Web::Machine::Manual> for more details on using C<Web::Machine> in
+general, and how C<Web::Machine> and L<Plack> interact.
+
+This is a port of L<Webmachine|https://github.com/basho/webmachine>, actually
+it is much closer to L<the Ruby
+version|https://github.com/seancribbs/webmachine-ruby>, with a little bit of
+L<the JavaScript version|https://github.com/tautologistics/nodemachine> and
+even some of L<the Python version|https://github.com/benoitc/pywebmachine>
 thrown in for good measure.
 
-It runs atop L<Plack>, but since it really handles the whole HTTP
-transaction, it is not appropriate to use most middleware modules.
-(NOTE: I will write more about this in the future.)
+You can learn a bit about Web::Machine's history from the slides for my L<2012
+YAPC::NA talk|https://speakerdeck.com/stevan_little/rest-from-the-trenches>.
 
-=head1 CAVEAT
-
-This module is extremely young and it is a port of an pretty young (June 2011)
-module in another language (ruby), which itself is a port of a still kind of
-young module (March 2009) in yet another language (erlang). But that all said,
-it really seems like a sane idea and so I stole it and ported it to Perl.
+To learn more about Webmachine, take a look at the links in the SEE ALSO
+section.
 
 =head1 METHODS
 
@@ -120,10 +171,24 @@ set forward by that module.
 
 =over 4
 
-=item C<new( resource => $resource_classname, ?tracing => 1|0 )>
+=item C<< new( resource => $resource_classname, ?resource_args => $arg_list, ?tracing => 1|0, ?streaming => 1|0, ?request_class => $request_class ) >>
 
-The constructor expects to get a C<$resource_classname> and can take an optional
-C<tracing> parameter which it will pass onto the L<Web::Machine::FSM>.
+The constructor expects to get a C<$resource_classname>, which it will use to
+load and create an instance of the resource class. If that class requires any
+additional arguments, they can be specified with the C<resource_args>
+parameter. The contents of the C<resource_args> parameter will be made
+available to the C<init()> method of C<Web::Machine::Resource>.
+
+The C<new> method can also take an optional C<tracing> parameter which it will
+pass on to L<Web::Machine::FSM> and an optional C<streaming> parameter, which
+if true will run the request in a L<PSGI|http://plackperl.org/> streaming
+response. This can be useful if you need to run your content generation
+asynchronously.
+
+The optional C<request_class> parameter accepts the name of a module that will
+be used as the request object. The module must be a class that inherits from
+L<Plack::Request>. Use this if you have a subclass of L<Plack::Request> that
+you would like to use in your L<Web::Machine::Resource>.
 
 =item C<inflate_request( $env )>
 
@@ -163,12 +228,20 @@ out information about the path taken through the state machine to STDERR.
 
 =over 4
 
+=item The diagram - L<https://github.com/basho/webmachine/wiki/Diagram>
+
 =item Original Erlang - L<https://github.com/basho/webmachine>
 
 =item Ruby port - L<https://github.com/seancribbs/webmachine-ruby>
 
 =item Node JS port - L<https://github.com/tautologistics/nodemachine>
 
-=item Python port - L<https://github.com/davisp/pywebmachine>
+=item Python port - L<https://github.com/benoitc/pywebmachine>
+
+=item 2012 YAPC::NA slides - L<https://speakerdeck.com/stevan_little/rest-from-the-trenches>
+
+=item an elaborate machine is indispensable: a blog post by Justin Sheehy - L<http://blog.therestfulway.com/2008/09/webmachine-is-resource-server-for-web.html>
+
+=item Resources, For Real This Time (with Webmachine): a video by Sean Cribbs - L<http://www.youtube.com/watch?v=odRrLK87s_Y>
 
 =back
